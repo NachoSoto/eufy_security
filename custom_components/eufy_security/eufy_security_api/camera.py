@@ -10,7 +10,7 @@ import traceback
 
 from .const import MessageField, STREAM_TIMEOUT_SECONDS, STREAM_SLEEP_SECONDS, GO2RTC_RTSP_PORT
 from .event import Event
-from .exceptions import CameraRTSPStreamNotEnabled, CameraRTSPStreamNotSupported
+from .exceptions import CameraRTSPStreamNotEnabled, CameraRTSPStreamNotSupported, FailedCommandException
 from .p2p_streamer import P2PStreamer
 from .product import Device
 from .util import wait_for_value
@@ -61,6 +61,9 @@ class Camera(Device):
 
         self.stream_future = None
         self.stream_checker = None
+        self.video_bytes_received = 0
+        self.last_video_chunk_size = 0
+        self.last_video_chunk_at = None
 
         self.p2p_streamer = P2PStreamer(self)
 
@@ -103,7 +106,18 @@ class Camera(Device):
 
     async def _handle_livestream_video_data_received(self, event: Event):
         #_LOGGER.debug(f"_handle_rtsp_livestream_stopped - {event}")
-        self.video_queue.append(bytearray(event.data["buffer"]["data"]))
+        chunk = bytearray(event.data["buffer"]["data"])
+        self.video_queue.append(chunk)
+        self.stream_status = StreamStatus.STREAMING
+        self.last_video_chunk_size = len(chunk)
+        self.video_bytes_received += self.last_video_chunk_size
+        self.last_video_chunk_at = datetime.datetime.now(datetime.timezone.utc)
+        if self.video_bytes_received == self.last_video_chunk_size:
+            _LOGGER.info(
+                "First Eufy livestream video chunk received for %s: %s bytes",
+                self.serial_no,
+                self.last_video_chunk_size,
+            )
 
     async def _handle_livestream_audio_data_received(self, event: Event):
         pass
@@ -118,8 +132,18 @@ class Camera(Device):
         if stream_type == StreamProvider.P2P:
             event = self.p2p_started_event
             event.clear()
-            if await self.api.start_livestream(self.product_type, self.serial_no) is False:
-                return False
+            try:
+                if await self.api.start_livestream(self.product_type, self.serial_no) is False:
+                    return False
+            except FailedCommandException as ex:
+                if ex.error_code != "device_livestream_already_running":
+                    raise
+                self.stream_debug = "warning - livestream already running; attaching to existing stream"
+                _LOGGER.warning(
+                    "Eufy livestream for %s was already running; treating start as successful",
+                    self.serial_no,
+                )
+                event.set()
         else:
             event = self.rtsp_started_event
             event.clear()
@@ -165,7 +189,16 @@ class Camera(Device):
             pass
         else:
             self.p2p_streamer.retry = False
-        await self.api.stop_livestream(self.product_type, self.serial_no)
+        try:
+            await self.api.stop_livestream(self.product_type, self.serial_no)
+        except FailedCommandException as ex:
+            if ex.error_code != "device_livestream_not_running":
+                raise
+            _LOGGER.warning(
+                "Eufy livestream for %s was already stopped; treating stop as successful",
+                self.serial_no,
+            )
+        self.stream_status = StreamStatus.IDLE
 
     async def start_rtsp_livestream(self) -> bool:
         """Process start rtsp livestream call"""

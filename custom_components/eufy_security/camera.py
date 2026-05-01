@@ -30,6 +30,7 @@ from .eufy_security_api.metadata import Metadata
 from .eufy_security_api.util import wait_for_value_to_equal
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
+CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS = 8
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -81,13 +82,21 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
         self._last_image = None
         if self.product.picture_base64 is not None:
             self._last_image = self.product.picture_bytes
+        self._last_image_refresh_status = "initialized"
 
         # ffmpeg entities
         self.ffmpeg = self.coordinator.hass.data[DATA_FFMPEG]
 
     async def stream_source(self) -> str:
         if self.is_streaming is False:
-            return None
+            _LOGGER.info("Starting Eufy stream on demand for %s", self.entity_id)
+            try:
+                if await self.product.start_livestream() is False:
+                    return None
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Failed to start Eufy stream for %s", self.entity_id)
+                return None
+            self.async_write_ha_state()
         return self.product.stream_url
 
     async def handle_async_mjpeg_stream(self, request):
@@ -136,7 +145,15 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     @property
     def extra_state_attributes(self):
-        return {"stream_debug": self.product.stream_debug}
+        return {
+            "stream_debug": self.product.stream_debug,
+            "stream_provider": self.product.stream_provider.name if self.product.stream_provider else None,
+            "video_queue_size": len(self.product.video_queue),
+            "video_bytes_received": self.product.video_bytes_received,
+            "last_video_chunk_size": self.product.last_video_chunk_size,
+            "last_video_chunk_at": self.product.last_video_chunk_at.isoformat() if self.product.last_video_chunk_at else None,
+            "last_image_refresh_status": self._last_image_refresh_status,
+        }
 
     async def _get_image_from_stream_url(self, width, height):
         while True:
@@ -150,8 +167,14 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         _LOGGER.debug(f"image 1 - {self.is_streaming} - {self.stream}")
         if self.is_streaming is True:
-            with contextlib.suppress(asyncio.TimeoutError):
-                self._last_image = await asyncio.wait_for(self._get_image_from_stream_url(width, height), STREAM_TIMEOUT_SECONDS)
+            try:
+                self._last_image = await asyncio.wait_for(
+                    self._get_image_from_stream_url(width, height),
+                    min(STREAM_TIMEOUT_SECONDS, CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS),
+                )
+                self._last_image_refresh_status = f"fresh:{len(self._last_image)}"
+            except asyncio.TimeoutError:
+                self._last_image_refresh_status = "timeout"
             _LOGGER.debug(f"image 2 - is_empty {self._last_image is None}")
 
         _LOGGER.debug(f"async_camera_image 5 - is_empty {self._last_image is None}")
