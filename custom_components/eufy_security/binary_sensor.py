@@ -2,6 +2,7 @@ import logging
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -26,11 +27,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
     )
     entities = [EufySecurityBinarySensor(coordinator, metadata) for metadata in product_properties]
 
-    for device in coordinator.devices.values():
-        entities.append(EufySecurityProductEntity(coordinator, device))
+    if coordinator.config.expose_debug_entities:
+        for device in coordinator.devices.values():
+            entities.append(EufySecurityProductEntity(coordinator, device))
 
-    for device in coordinator.stations.values():
-        entities.append(EufySecurityProductEntity(coordinator, device))
+        for device in coordinator.stations.values():
+            entities.append(EufySecurityProductEntity(coordinator, device))
     async_add_entities(entities)
 
 
@@ -48,6 +50,8 @@ class EufySecurityBinarySensor(BinarySensorEntity, EufySecurityEntity):
 
 class EufySecurityProductEntity(BinarySensorEntity, CoordinatorEntity):
     """Debug entity for integration"""
+
+    _unrecorded_attributes = frozenset({MATCH_ALL})
 
     def __init__(self, coordinator: EufySecurityDataUpdateCoordinator, product: Product) -> None:
         super().__init__(coordinator)

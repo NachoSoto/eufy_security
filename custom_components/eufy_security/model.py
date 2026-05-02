@@ -24,6 +24,9 @@ class ConfigField(Enum):
     sync_interval = 600  # seconds
     rtsp_server_address = 3
     no_stream_in_hass = False
+    expose_stream_debug_attributes = False
+    expose_debug_entities = False
+    write_raw_video_debug_files = False
     name_for_custom1 = "Custom 1"
     name_for_custom2 = "Custom 2"
     name_for_custom3 = "Custom 3"
@@ -44,6 +47,9 @@ class Config:
     sync_interval: int = ConfigField.sync_interval.value
     rtsp_server_address: str = ConfigField.host.value
     no_stream_in_hass: bool = ConfigField.no_stream_in_hass.value
+    expose_stream_debug_attributes: bool = ConfigField.expose_stream_debug_attributes.value
+    expose_debug_entities: bool = ConfigField.expose_debug_entities.value
+    write_raw_video_debug_files: bool = ConfigField.write_raw_video_debug_files.value
     name_for_custom1: str = ConfigField.name_for_custom1.value
     name_for_custom2: str = ConfigField.name_for_custom2.value
     name_for_custom3: str = ConfigField.name_for_custom3.value

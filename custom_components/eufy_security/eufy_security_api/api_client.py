@@ -308,7 +308,8 @@ class ApiClient:
                 product = self.__dict__[plural_product][event.data[MessageField.SERIAL_NO.value]]
                 await product.process_event(event)
             except (KeyError, TypeError) as exc:
-                raise DeviceNotInitializedYetException(event) from exc
+                _LOGGER.debug("Skipping Eufy event for product that is not initialized yet: %s", event.type, exc_info=exc)
+                return
         elif event.data[MessageField.SOURCE.value] in [EventSourceType.driver.name, EventSourceType.server.name]:
             # handle driver or server specific events locally
             await self._process_driver_event(event)

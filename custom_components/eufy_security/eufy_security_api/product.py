@@ -90,10 +90,16 @@ class Product:
     async def process_event(self, event: Event):
         """Act on received event"""
         handler_func = None
+        should_notify_state_listener = True
 
         try:
             handler = EventNameToHandler(event.type)
             handler_func = getattr(self, f"_handle_{handler.name}", None)
+            if handler in (
+                EventNameToHandler.livestream_video_data_received,
+                EventNameToHandler.livestream_audio_data_received,
+            ):
+                should_notify_state_listener = bool(getattr(self.api.config, "expose_stream_debug_attributes", False))
         except ValueError:
             # event is not acted on, skip it
             _LOGGER.debug(f"event not handled -{self.serial_no} - {event}")
@@ -102,7 +108,7 @@ class Product:
         if handler_func is not None:
             await handler_func(event)
 
-        if self.state_update_listener is not None:
+        if should_notify_state_listener and self.state_update_listener is not None:
             callback_func = self.state_update_listener
             callback_func()
 

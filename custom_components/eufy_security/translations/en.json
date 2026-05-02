@@ -33,6 +33,9 @@
           "sync_interval": "Cloud Scan Interval in seconds [1 to 9999]",
           "rtsp_server_address": "Host IP Address for GO2RTC Add On (P2P)",
           "no_stream_in_hass": "Do not use STREAM module inside Home Assistant (if you do not watch the video inside Home Assistant native streaming or you are using WebRTC, enable this to decrease CPU usage",
+          "expose_stream_debug_attributes": "Expose live stream debug attributes on camera entities",
+          "expose_debug_entities": "Create debug entities for raw Eufy device/station metadata",
+          "write_raw_video_debug_files": "Write temporary raw video debug files for snapshot troubleshooting",
           "name_for_custom1": "Override Name for Custom1 Guard Mode",
           "name_for_custom2": "Override Name for Custom2 Guard Mode",
           "name_for_custom3": "Override Name for Custom3 Guard Mode"

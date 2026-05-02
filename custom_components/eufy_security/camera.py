@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import re
 import traceback
 
 from haffmpeg.camera import CameraMjpeg
@@ -31,7 +33,9 @@ from .eufy_security_api.util import wait_for_value_to_equal
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS = 8
-RAW_VIDEO_MIN_BYTES = 64 * 1024
+RAW_VIDEO_MIN_BYTES = 128 * 1024
+RAW_VIDEO_DEBUG_DIR = "/config/codex-eufy-camera-snapshots-tmp"
+DEFAULT_SNAPSHOT_WIDTH = 1280
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -71,6 +75,17 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
 
 class EufySecurityCamera(Camera, EufySecurityEntity):
     """Base camera entity for integration"""
+
+    _unrecorded_attributes = frozenset(
+        {
+            "stream_debug",
+            "stream_provider",
+            "video_queue_size",
+            "video_bytes_received",
+            "last_video_chunk_size",
+            "last_video_chunk_at",
+        }
+    )
 
     def __init__(self, coordinator: EufySecurityDataUpdateCoordinator, metadata: Metadata) -> None:
         Camera.__init__(self)
@@ -146,15 +161,21 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     @property
     def extra_state_attributes(self):
-        return {
-            "stream_debug": self.product.stream_debug,
-            "stream_provider": self.product.stream_provider.name if self.product.stream_provider else None,
-            "video_queue_size": len(self.product.video_queue),
-            "video_bytes_received": self.product.video_bytes_received,
-            "last_video_chunk_size": self.product.last_video_chunk_size,
-            "last_video_chunk_at": self.product.last_video_chunk_at.isoformat() if self.product.last_video_chunk_at else None,
+        attributes = {
             "last_image_refresh_status": self._last_image_refresh_status,
         }
+        if self.coordinator.config.expose_stream_debug_attributes:
+            attributes.update(
+                {
+                    "stream_debug": self.product.stream_debug,
+                    "stream_provider": self.product.stream_provider.name if self.product.stream_provider else None,
+                    "video_queue_size": len(self.product.video_queue),
+                    "video_bytes_received": self.product.video_bytes_received,
+                    "last_video_chunk_size": self.product.last_video_chunk_size,
+                    "last_video_chunk_at": self.product.last_video_chunk_at.isoformat() if self.product.last_video_chunk_at else None,
+                }
+            )
+        return attributes
 
     async def _get_image_from_stream_url(self, width, height):
         stream_source = await self.stream_source()
@@ -171,65 +192,92 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     @staticmethod
     def _raw_video_format(data: bytes) -> str | None:
-        start_codes = (b"\x00\x00\x00\x01", b"\x00\x00\x01")
-        for start_code in start_codes:
-            index = data.find(start_code)
-            if index == -1 or index + len(start_code) >= len(data):
-                continue
-            nal_header = data[index + len(start_code)]
+        saw_h264 = False
+        for match in re.finditer(rb"\x00\x00(?:\x00)?\x01(.)", data, re.DOTALL):
+            nal_header = match.group(1)[0]
             if nal_header in (0x40, 0x42, 0x44):
                 return "hevc"
+            saw_h264 = True
+        if saw_h264:
             return "h264"
         return None
 
     async def _get_image_from_raw_video(self, width, height) -> bytes | None:
-        if await self.stream_source() is None:
-            return None
+        started_snapshot_stream = not self.is_streaming
+        try:
+            if await self.stream_source() is None:
+                return None
 
-        while self.product.recent_video_bytes < RAW_VIDEO_MIN_BYTES:
-            await asyncio.sleep(0.1)
+            while self.product.recent_video_bytes < RAW_VIDEO_MIN_BYTES:
+                await asyncio.sleep(0.1)
 
-        data = self.product.recent_video_data()
-        video_format = self._raw_video_format(data)
-        if video_format is None:
-            _LOGGER.debug("Unable to detect raw Eufy video format for %s", self.entity_id)
-            return None
+            data = self.product.recent_video_data()
+            if self.coordinator.config.write_raw_video_debug_files:
+                await self._write_raw_video_debug_capture(data)
+            video_format = self._raw_video_format(data)
+            if video_format is None:
+                _LOGGER.debug("Unable to detect raw Eufy video format for %s", self.entity_id)
+                return None
 
-        command = [
-            self.ffmpeg.binary,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            video_format,
-            "-i",
-            "pipe:0",
-            "-frames:v",
-            "1",
-        ]
-        if width is not None or height is not None:
+            command = [
+                self.ffmpeg.binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                video_format,
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+            ]
+            if width is None and height is None:
+                width = DEFAULT_SNAPSHOT_WIDTH
             scale_width = width if width is not None else -1
             scale_height = height if height is not None else -1
             command.extend(["-vf", f"scale={scale_width}:{scale_height}"])
-        command.extend(["-f", "mjpeg", "pipe:1"])
+            command.extend(["-f", "mjpeg", "pipe:1"])
 
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate(data)
-        if process.returncode != 0 or not stdout:
-            _LOGGER.debug(
-                "Raw Eufy video decode failed for %s with format %s: %s",
-                self.entity_id,
-                video_format,
-                stderr.decode(errors="replace").strip(),
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            return None
-        _LOGGER.debug("Raw Eufy video decode succeeded for %s with format %s", self.entity_id, video_format)
-        return stdout
+            stdout, stderr = await process.communicate(data)
+            if process.returncode != 0 or not stdout:
+                _LOGGER.debug(
+                    "Raw Eufy video decode failed for %s with format %s: %s",
+                    self.entity_id,
+                    video_format,
+                    stderr.decode(errors="replace").strip(),
+                )
+                return None
+            _LOGGER.debug("Raw Eufy video decode succeeded for %s with format %s", self.entity_id, video_format)
+            return stdout
+        finally:
+            if started_snapshot_stream and self.is_streaming:
+                with contextlib.suppress(Exception):
+                    await self.product.stop_livestream()
+                self.async_write_ha_state()
+
+    async def _write_raw_video_debug_capture(self, data: bytes) -> None:
+        def write_capture() -> None:
+            os.makedirs(RAW_VIDEO_DEBUG_DIR, exist_ok=True)
+            safe_entity_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", self.entity_id)
+            path = os.path.join(RAW_VIDEO_DEBUG_DIR, f"{safe_entity_id}.raw-video")
+            meta_path = f"{path}.meta"
+            with open(path, "wb") as file:
+                file.write(data)
+            with open(meta_path, "w", encoding="utf-8") as file:
+                file.write(f"entity_id={self.entity_id}\n")
+                file.write(f"bytes={len(data)}\n")
+                file.write(f"first_bytes_hex={data[:128].hex()}\n")
+
+        try:
+            await asyncio.to_thread(write_capture)
+        except OSError:
+            _LOGGER.debug("Unable to write Eufy raw video debug capture for %s", self.entity_id, exc_info=True)
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         _LOGGER.debug(f"image 1 - {self.is_streaming} - {self.stream}")
@@ -257,6 +305,7 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     async def _start_livestream(self) -> None:
         """start byte based livestream on camera"""
+        self.product.raw_video_capture_name = self.entity_id
         if await self.product.start_livestream() is False:
             await self._stop_livestream()
         else:

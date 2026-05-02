@@ -175,11 +175,18 @@ class Camera(Device):
 
         _LOGGER.debug(f"async_restart_livestream - start - {self.p2p_streamer.retry}")
         if self.stream_status != StreamStatus.IDLE:
-            await self.stop_livestream(is_internal=True)
+            try:
+                await self.stop_livestream(is_internal=True)
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.debug("Unable to stop Eufy livestream during retry cleanup: %s", type(ex).__name__)
 
         if self.p2p_streamer.retry is True:
             _LOGGER.debug(f"async_restart_livestream - start live stream start - {self.p2p_streamer.retry}")
-            await self.start_livestream()
+            try:
+                await self.start_livestream()
+            except Exception as ex:  # pylint: disable=broad-except
+                self.stream_status = StreamStatus.IDLE
+                _LOGGER.debug("Unable to restart Eufy livestream after retry: %s", type(ex).__name__)
             _LOGGER.debug(f"async_restart_livestream - start live stream end - {self.p2p_streamer.retry}")
 
     async def start_livestream(self) -> bool:
@@ -212,6 +219,8 @@ class Camera(Device):
                 "Eufy livestream for %s was already stopped; treating stop as successful",
                 self.serial_no,
             )
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("Unable to stop Eufy livestream through websocket: %s", type(ex).__name__)
         self.stream_status = StreamStatus.IDLE
 
     def recent_video_data(self) -> bytes:
