@@ -16,6 +16,7 @@ from .product import Device
 from .util import wait_for_value
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
+MAX_RECENT_VIDEO_BYTES = 8 * 1024 * 1024
 
 
 class StreamStatus(Enum):
@@ -64,6 +65,8 @@ class Camera(Device):
         self.video_bytes_received = 0
         self.last_video_chunk_size = 0
         self.last_video_chunk_at = None
+        self.recent_video_chunks = deque()
+        self.recent_video_bytes = 0
 
         self.p2p_streamer = P2PStreamer(self)
 
@@ -93,6 +96,8 @@ class Camera(Device):
         self.stream_status = StreamStatus.IDLE
         self.video_queue = deque()
         self.audio_queue = deque()
+        self.recent_video_chunks = deque()
+        self.recent_video_bytes = 0
 
     async def _handle_rtsp_livestream_started(self, event: Event):
         # automatically find this function for respective event
@@ -108,6 +113,10 @@ class Camera(Device):
         #_LOGGER.debug(f"_handle_rtsp_livestream_stopped - {event}")
         chunk = bytearray(event.data["buffer"]["data"])
         self.video_queue.append(chunk)
+        self.recent_video_chunks.append(bytes(chunk))
+        self.recent_video_bytes += len(chunk)
+        while self.recent_video_bytes > MAX_RECENT_VIDEO_BYTES and len(self.recent_video_chunks) > 1:
+            self.recent_video_bytes -= len(self.recent_video_chunks.popleft())
         self.stream_status = StreamStatus.STREAMING
         self.last_video_chunk_size = len(chunk)
         self.video_bytes_received += self.last_video_chunk_size
@@ -175,6 +184,11 @@ class Camera(Device):
 
     async def start_livestream(self) -> bool:
         """Process start p2p livestream call"""
+        self.video_bytes_received = 0
+        self.last_video_chunk_size = 0
+        self.last_video_chunk_at = None
+        self.recent_video_chunks = deque()
+        self.recent_video_bytes = 0
         if await self._initiate_start_stream(StreamProvider.P2P) is False:
             return False
         self.stream_future = asyncio.create_task(self.p2p_streamer.start())
@@ -199,6 +213,9 @@ class Camera(Device):
                 self.serial_no,
             )
         self.stream_status = StreamStatus.IDLE
+
+    def recent_video_data(self) -> bytes:
+        return b"".join(self.recent_video_chunks)
 
     async def start_rtsp_livestream(self) -> bool:
         """Process start rtsp livestream call"""

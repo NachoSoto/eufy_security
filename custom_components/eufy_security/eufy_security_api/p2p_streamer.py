@@ -13,6 +13,9 @@ import os
 from .const import GO2RTC_API_PORT, GO2RTC_API_URL, STREAM_TIMEOUT_SECONDS
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
+DEBUG_CAPTURE_DIR = "/config/codex-eufy-camera-snapshots-tmp"
+DEBUG_CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024
+DEBUG_CAPTURE_ENABLED = os.environ.get("EUFY_SECURITY_DEBUG_CAPTURE") == "1"
 
 class P2PStreamer:
     """Class to manage external stream provider and byte based ffmpeg streaming"""
@@ -20,6 +23,41 @@ class P2PStreamer:
     def __init__(self, camera) -> None:
         self.camera = camera
         self.retry = None
+        self.debug_capture_path = os.path.join(DEBUG_CAPTURE_DIR, f"{self.camera.serial_no}.p2p-video")
+        self.debug_capture_bytes = 0
+
+    def _reset_debug_capture(self):
+        if not DEBUG_CAPTURE_ENABLED:
+            return
+        self.debug_capture_bytes = 0
+        try:
+            os.makedirs(DEBUG_CAPTURE_DIR, exist_ok=True)
+            for suffix in ("", ".meta"):
+                path = f"{self.debug_capture_path}{suffix}"
+                if os.path.exists(path):
+                    os.remove(path)
+        except OSError:
+            _LOGGER.debug("Unable to reset Eufy P2P debug capture", exc_info=True)
+
+    def _capture_chunk(self, item: bytes, queue_name: str):
+        if not DEBUG_CAPTURE_ENABLED:
+            return
+        if queue_name != "video" or self.debug_capture_bytes >= DEBUG_CAPTURE_LIMIT_BYTES:
+            return
+        try:
+            remaining = DEBUG_CAPTURE_LIMIT_BYTES - self.debug_capture_bytes
+            chunk = bytes(item[:remaining])
+            with open(self.debug_capture_path, "ab") as file:
+                file.write(chunk)
+            self.debug_capture_bytes += len(chunk)
+            if self.debug_capture_bytes == len(chunk):
+                with open(f"{self.debug_capture_path}.meta", "w", encoding="utf-8") as file:
+                    file.write(f"serial={self.camera.serial_no}\n")
+                    file.write(f"stream_url={self.camera.stream_url}\n")
+                    file.write(f"first_chunk_size={len(item)}\n")
+                    file.write(f"first_chunk_hex={bytes(item[:64]).hex()}\n")
+        except OSError:
+            _LOGGER.debug("Unable to write Eufy P2P debug capture", exc_info=True)
 
     async def chunk_generator(self, queue, queue_name):
         retry_count = 0
@@ -28,6 +66,7 @@ class P2PStreamer:
             try:
                 item = queue.popleft()
                 #_LOGGER.debug(f"chunk_generator {queue_name} yield data {retry_count} - {len(item)}")
+                self._capture_chunk(item, queue_name)
                 retry_count = 0
                 yield item
             except IndexError:
@@ -88,6 +127,7 @@ class P2PStreamer:
         """start streaming thread"""
         # send API command to go2rtc to create a new stream
         self.retry = None
+        self._reset_debug_capture()
         await self._create_stream_on_go2rtc()
         await asyncio.gather(
             #asyncio.to_thread(self._run, self.camera.audio_queue, "audio"),

@@ -349,6 +349,8 @@ class ApiClient:
     async def send_message(self, message: dict) -> None:
         """send message to websocket api"""
         _LOGGER.debug(f"send_message - {message}")
+        if self._client is None:
+            raise WebSocketConnectionException("Websocket client is disconnected")
         await self._client.send_message(json.dumps(message))
 
     async def disconnect(self):
@@ -359,6 +361,8 @@ class ApiClient:
 
     @property
     def available(self) -> bool:
+        if self._client is None:
+            return False
         return self._client.available
 
 

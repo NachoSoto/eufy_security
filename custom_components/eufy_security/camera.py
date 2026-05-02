@@ -31,6 +31,7 @@ from .eufy_security_api.util import wait_for_value_to_equal
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
 CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS = 8
+RAW_VIDEO_MIN_BYTES = 64 * 1024
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -156,26 +157,98 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
         }
 
     async def _get_image_from_stream_url(self, width, height):
+        stream_source = await self.stream_source()
+        if stream_source is None:
+            _LOGGER.debug("_get_image_from_stream_url - stream source unavailable")
+            return None
         while True:
-            result = await ffmpeg.async_get_image(self.hass, await self.stream_source(), width=width, height=height)
+            result = await ffmpeg.async_get_image(self.hass, stream_source, width=width, height=height)
             if result is not None:
                 _LOGGER.debug(f"_get_image_from_stream_url - received {len(result)}")
                 return result
             _LOGGER.debug(f"_get_image_from_stream_url - is_empty {result is None}")
             await asyncio.sleep(STREAM_SLEEP_SECONDS)
 
+    @staticmethod
+    def _raw_video_format(data: bytes) -> str | None:
+        start_codes = (b"\x00\x00\x00\x01", b"\x00\x00\x01")
+        for start_code in start_codes:
+            index = data.find(start_code)
+            if index == -1 or index + len(start_code) >= len(data):
+                continue
+            nal_header = data[index + len(start_code)]
+            if nal_header in (0x40, 0x42, 0x44):
+                return "hevc"
+            return "h264"
+        return None
+
+    async def _get_image_from_raw_video(self, width, height) -> bytes | None:
+        if await self.stream_source() is None:
+            return None
+
+        while self.product.recent_video_bytes < RAW_VIDEO_MIN_BYTES:
+            await asyncio.sleep(0.1)
+
+        data = self.product.recent_video_data()
+        video_format = self._raw_video_format(data)
+        if video_format is None:
+            _LOGGER.debug("Unable to detect raw Eufy video format for %s", self.entity_id)
+            return None
+
+        command = [
+            self.ffmpeg.binary,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            video_format,
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+        ]
+        if width is not None or height is not None:
+            scale_width = width if width is not None else -1
+            scale_height = height if height is not None else -1
+            command.extend(["-vf", f"scale={scale_width}:{scale_height}"])
+        command.extend(["-f", "mjpeg", "pipe:1"])
+
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate(data)
+        if process.returncode != 0 or not stdout:
+            _LOGGER.debug(
+                "Raw Eufy video decode failed for %s with format %s: %s",
+                self.entity_id,
+                video_format,
+                stderr.decode(errors="replace").strip(),
+            )
+            return None
+        _LOGGER.debug("Raw Eufy video decode succeeded for %s with format %s", self.entity_id, video_format)
+        return stdout
+
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         _LOGGER.debug(f"image 1 - {self.is_streaming} - {self.stream}")
-        if self.is_streaming is True:
-            try:
-                self._last_image = await asyncio.wait_for(
-                    self._get_image_from_stream_url(width, height),
-                    min(STREAM_TIMEOUT_SECONDS, CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS),
-                )
+        try:
+            image = await asyncio.wait_for(
+                self._get_image_from_raw_video(width, height),
+                min(STREAM_TIMEOUT_SECONDS, CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS),
+            )
+            if image is not None:
+                self._last_image = image
                 self._last_image_refresh_status = f"fresh:{len(self._last_image)}"
-            except asyncio.TimeoutError:
-                self._last_image_refresh_status = "timeout"
-            _LOGGER.debug(f"image 2 - is_empty {self._last_image is None}")
+            else:
+                self._last_image_refresh_status = "no_stream_source"
+        except asyncio.TimeoutError:
+            self._last_image_refresh_status = "timeout"
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.exception("Failed to refresh Eufy camera image for %s", self.entity_id)
+            self._last_image_refresh_status = f"error:{type(ex).__name__}"
+        _LOGGER.debug(f"image 2 - is_empty {self._last_image is None}")
 
         _LOGGER.debug(f"async_camera_image 5 - is_empty {self._last_image is None}")
         if self._last_image is not None:
