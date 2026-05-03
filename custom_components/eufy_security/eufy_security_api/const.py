@@ -60,6 +60,7 @@ class MessageField(Enum):
     # streaming specific
     RTSP_STREAM = "rtspStream"
     RTSP_STREAM_URL = "rtspStreamUrl"
+    VIDEO_CODEC = "videoCodec"
 
     # lock specific
     LOCKED = "locked"

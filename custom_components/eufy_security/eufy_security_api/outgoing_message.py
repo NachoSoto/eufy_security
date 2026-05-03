@@ -28,6 +28,7 @@ class OutgoingMessageToParameter(Enum):
     level = "log_level"
     ringtone = "ringtone"
     pin = "pin"
+    videoCodec = "video_codec"
 
 
 class OutgoingMessageType(Enum):
@@ -73,7 +74,7 @@ class OutgoingMessageType(Enum):
     start_rtsp_livestream = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
     stop_rtsp_livestream = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
     is_rtsp_livestreaming = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
-    start_livestream = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
+    start_livestream = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device, MessageField.VIDEO_CODEC: None}
     stop_livestream = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
     is_livestreaming = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}
     get_voices = {MessageField.DUMMY: auto(), MessageField.DOMAIN: EventSourceType.device}

@@ -32,7 +32,8 @@ from .eufy_security_api.metadata import Metadata
 from .eufy_security_api.util import wait_for_value_to_equal
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
-CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS = 8
+RAW_VIDEO_IMAGE_TIMEOUT_SECONDS = 6
+STREAM_URL_IMAGE_TIMEOUT_SECONDS = 2
 RAW_VIDEO_MIN_BYTES = 128 * 1024
 RAW_VIDEO_DEBUG_DIR = "/config/codex-eufy-camera-snapshots-tmp"
 DEFAULT_SNAPSHOT_WIDTH = 1280
@@ -178,17 +179,24 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
         return attributes
 
     async def _get_image_from_stream_url(self, width, height):
-        stream_source = await self.stream_source()
-        if stream_source is None:
-            _LOGGER.debug("_get_image_from_stream_url - stream source unavailable")
-            return None
-        while True:
-            result = await ffmpeg.async_get_image(self.hass, stream_source, width=width, height=height)
-            if result is not None:
-                _LOGGER.debug(f"_get_image_from_stream_url - received {len(result)}")
-                return result
-            _LOGGER.debug(f"_get_image_from_stream_url - is_empty {result is None}")
-            await asyncio.sleep(STREAM_SLEEP_SECONDS)
+        started_snapshot_stream = not self.is_streaming
+        try:
+            stream_source = await self.stream_source()
+            if stream_source is None:
+                _LOGGER.debug("_get_image_from_stream_url - stream source unavailable")
+                return None
+            while True:
+                result = await ffmpeg.async_get_image(self.hass, stream_source, width=width, height=height)
+                if result is not None:
+                    _LOGGER.debug(f"_get_image_from_stream_url - received {len(result)}")
+                    return result
+                _LOGGER.debug(f"_get_image_from_stream_url - is_empty {result is None}")
+                await asyncio.sleep(STREAM_SLEEP_SECONDS)
+        finally:
+            if started_snapshot_stream and self.is_streaming:
+                with contextlib.suppress(Exception):
+                    await self.product.stop_livestream()
+                self.async_write_ha_state()
 
     @staticmethod
     def _raw_video_format(data: bytes) -> str | None:
@@ -205,8 +213,10 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
     async def _get_image_from_raw_video(self, width, height) -> bytes | None:
         started_snapshot_stream = not self.is_streaming
         try:
-            if await self.stream_source() is None:
-                return None
+            if started_snapshot_stream:
+                _LOGGER.debug("Starting snapshot-only Eufy P2P stream for %s", self.entity_id)
+                if await self.product.start_livestream(bridge_to_go2rtc=False) is False:
+                    return None
 
             while self.product.recent_video_bytes < RAW_VIDEO_MIN_BYTES:
                 await asyncio.sleep(0.1)
@@ -281,16 +291,34 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         _LOGGER.debug(f"image 1 - {self.is_streaming} - {self.stream}")
+        timed_out = False
         try:
-            image = await asyncio.wait_for(
-                self._get_image_from_raw_video(width, height),
-                min(STREAM_TIMEOUT_SECONDS, CAMERA_IMAGE_REFRESH_TIMEOUT_SECONDS),
-            )
+            try:
+                image = await asyncio.wait_for(
+                    self._get_image_from_raw_video(width, height),
+                    RAW_VIDEO_IMAGE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                image = None
+                _LOGGER.debug("Timed out refreshing Eufy image from raw video for %s", self.entity_id)
+
+            if image is None:
+                try:
+                    image = await asyncio.wait_for(
+                        self._get_image_from_stream_url(width, height),
+                        STREAM_URL_IMAGE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    image = None
+                    _LOGGER.debug("Timed out refreshing Eufy image from stream URL for %s", self.entity_id)
+
             if image is not None:
                 self._last_image = image
                 self._last_image_refresh_status = f"fresh:{len(self._last_image)}"
             else:
-                self._last_image_refresh_status = "no_stream_source"
+                self._last_image_refresh_status = "timeout" if timed_out else "no_stream_source"
         except asyncio.TimeoutError:
             self._last_image_refresh_status = "timeout"
         except Exception as ex:  # pylint: disable=broad-except
@@ -306,10 +334,8 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
     async def _start_livestream(self) -> None:
         """start byte based livestream on camera"""
         self.product.raw_video_capture_name = self.entity_id
-        if await self.product.start_livestream() is False:
+        if await self.product.start_livestream(bridge_to_go2rtc=False) is False:
             await self._stop_livestream()
-        else:
-            await self._start_hass_streaming()
         self.async_write_ha_state()
 
     async def _stop_livestream(self) -> None:

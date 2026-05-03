@@ -189,7 +189,7 @@ class Camera(Device):
                 _LOGGER.debug("Unable to restart Eufy livestream after retry: %s", type(ex).__name__)
             _LOGGER.debug(f"async_restart_livestream - start live stream end - {self.p2p_streamer.retry}")
 
-    async def start_livestream(self) -> bool:
+    async def start_livestream(self, bridge_to_go2rtc: bool = True) -> bool:
         """Process start p2p livestream call"""
         self.video_bytes_received = 0
         self.last_video_chunk_size = 0
@@ -198,8 +198,12 @@ class Camera(Device):
         self.recent_video_bytes = 0
         if await self._initiate_start_stream(StreamProvider.P2P) is False:
             return False
-        self.stream_future = asyncio.create_task(self.p2p_streamer.start())
-        self.stream_checker = asyncio.create_task(self._check_live_stream())
+        if bridge_to_go2rtc:
+            self.stream_future = asyncio.create_task(self.p2p_streamer.start())
+            self.stream_checker = asyncio.create_task(self._check_live_stream())
+        else:
+            self.stream_future = None
+            self.stream_checker = None
         self.stream_status = StreamStatus.STREAMING
         return True
 

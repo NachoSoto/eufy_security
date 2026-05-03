@@ -52,6 +52,11 @@ class ApiClient:
         self._mfa_future: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
 
     @property
+    def config(self):
+        """Integration config."""
+        return self._config
+
+    @property
     def devices(self) -> dict:
         """initialized devices"""
         return self._devices
@@ -233,7 +238,10 @@ class ApiClient:
 
     async def start_livestream(self, product_type: ProductType, serial_no: str) -> None:
         """Process start p2p livestream call"""
-        await self._send_message_get_response(OutgoingMessage(OutgoingMessageType.start_livestream, serial_no=serial_no))
+        video_codec = "H265" if serial_no.startswith("T8423") else "H264"
+        await self._send_message_get_response(
+            OutgoingMessage(OutgoingMessageType.start_livestream, serial_no=serial_no, video_codec=video_codec)
+        )
 
     async def stop_livestream(self, product_type: ProductType, serial_no: str) -> None:
         """Process stop p2p livestream call"""
