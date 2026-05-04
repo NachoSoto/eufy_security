@@ -291,6 +291,11 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         _LOGGER.debug(f"image 1 - {self.is_streaming} - {self.stream}")
+        if not self.is_streaming:
+            self._last_image_refresh_status = "cached:not_streaming" if self._last_image is not None else "skipped:not_streaming"
+            self.async_write_ha_state()
+            return self._last_image
+
         timed_out = False
         try:
             try:
@@ -329,6 +334,7 @@ class EufySecurityCamera(Camera, EufySecurityEntity):
         _LOGGER.debug(f"async_camera_image 5 - is_empty {self._last_image is None}")
         if self._last_image is not None:
             _LOGGER.debug(f"async_camera_image 6 - {len(self._last_image)}")
+        self.async_write_ha_state()
         return self._last_image
 
     async def _start_livestream(self) -> None:

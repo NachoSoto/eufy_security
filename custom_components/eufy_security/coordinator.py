@@ -19,6 +19,7 @@ from .eufy_security_api.exceptions import (
     MultiFactorCodeRequiredException,
     WebSocketConnectionException,
 )
+from .disabled_serials import disabled_camera_serials
 from .model import Config
 
 _LOGGER: logging.Logger = logging.getLogger(__package__)
@@ -58,12 +59,23 @@ class EufySecurityDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def devices(self) -> dict:
         """get devices from API"""
-        return self._api.devices
+        return self._filter_disabled_serials(self._api.devices)
 
     @property
     def stations(self) -> dict:
         """get stations from API"""
-        return self._api.stations
+        return self._filter_disabled_serials(self._api.stations)
+
+    @staticmethod
+    def _filter_disabled_serials(products: dict) -> dict:
+        disabled_serials = disabled_camera_serials()
+        if not disabled_serials:
+            return products
+        return {
+            serial_no: product
+            for serial_no, product in products.items()
+            if serial_no not in disabled_serials and getattr(product, "serial_no", serial_no) not in disabled_serials
+        }
 
     async def set_mfa_and_connect(self, mfa_input: str):
         """set mfa and connect"""
@@ -110,4 +122,3 @@ class EufySecurityDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def available(self) -> bool:
         return self._api.available
-
